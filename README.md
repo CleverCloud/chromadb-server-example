@@ -1,4 +1,7 @@
+![Clever Cloud logo](/github-assets/clever-cloud-logo.png)
+
 # ChromaDB Server Example on Clever Cloud
+[![Clever Cloud - PaaS](https://img.shields.io/badge/Clever%20Cloud-PaaS-orange)](https://clever-cloud.com)
 
 ## Overview
 
