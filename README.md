@@ -22,9 +22,17 @@ This example demonstrates how to deploy a persistent ChromaDB server with authen
 ## Project Structure
 
 ```
-├── requirements.txt         # Python dependencies (chromadb)
+├── requirements.txt         # Python dependencies (chromadb + proxy stack)
+├── proxy.py                 # Basic-auth reverse proxy that secures the server
 └── README.md                # This documentation
 ```
+
+> **Why a proxy?** ChromaDB 1.x removed native authentication — the `chroma run`
+> server ignores the `CHROMA_SERVER_AUTHN_*` settings and listens with no access
+> control. To keep this example secure, ChromaDB runs privately on localhost and
+> a small reverse proxy (`proxy.py`) handles HTTP Basic authentication on the
+> public port, forwarding only authorized requests. The client code is standard
+> Chroma Basic auth, so nothing changes on the client side.
 
 ## Deployment Guide
 
@@ -74,22 +82,33 @@ Keep the `yyy` part for the next step.
 
 ### Configure ChromaDB Server with Authentication
 
+The application runs two processes in the same Clever Cloud app:
+
+- **ChromaDB** runs privately on `127.0.0.1:8000`, started as a [Clever Cloud worker](https://developers.clever-cloud.com/doc/develop/workers/).
+- **`proxy.py`** runs on the public port `9000`, validates HTTP Basic credentials, and forwards authorized requests to ChromaDB. It is the application's run command.
+
 ```bash
 # Step 6: Add the FS Bucket host to your application, link it to the `/db` folder
 # Replace 'yyy' with the real ID part from the previous step
 clever env set CC_FS_BUCKET "/db:bucket-yyy-fsbucket.services.clever-cloud.com"
 
-# Step 7: Generate a login:password pair, configure it for ChromaDB
+# Step 7: Generate a login:password pair for the proxy to enforce
 # Replace '<USERNAME>' with your login and '<PASSWORD>' with your password
-clever env set CHROMA_SERVER_AUTHN_PROVIDER "chromadb.auth.basic_authn.BasicAuthenticationServerProvider"
-clever env set CHROMA_SERVER_AUTHN_CREDENTIALS $(htpasswd -Bbn <USERNAME> <PASSWORD>)
+clever env set PROXY_AUTH_CREDENTIALS "$(htpasswd -Bbn <USERNAME> <PASSWORD>)"
 
-# Step 8: Configure the ChromaDB server launch
-clever env set CC_RUN_COMMAND "chroma run --host 0.0.0.0 --port 9000 --path db/data"
+# Step 8: Run ChromaDB privately as a worker (localhost only, never exposed)
+clever env set CC_WORKER_COMMAND_0 "chroma run --host 127.0.0.1 --port 8000 --path db/data"
 
-# Step 9: Deploy your application
+# Step 9: Run the auth proxy on the public port as the application's run command
+clever env set CC_RUN_COMMAND "python proxy.py"
+
+# Step 10: Deploy your application
 clever deploy
 ```
+
+> **Note:** On Clever Cloud a Python app started via `CC_RUN_COMMAND` must listen
+> on port `9000` — `proxy.py` does this by default. ChromaDB stays on its private
+> `8000` port and is only reachable through the proxy.
 
 ## Accessing Your ChromaDB Server
 
@@ -104,6 +123,12 @@ clever domain
 ```
 
 ## Using Your ChromaDB Server
+
+The sample client below uses [`python-dotenv`](https://pypi.org/project/python-dotenv/) to optionally read credentials from a `.env` file. Install the two libraries it needs:
+
+```bash
+pip install chromadb python-dotenv
+```
 
 Here's a sample Python script to interact with your deployed ChromaDB server:
 
@@ -120,7 +145,8 @@ load_dotenv()
 chroma_client = chromadb.HttpClient(
     # Replace with your application host
     host="app-xxx.cleverapps.io",  # or your custom domain
-    port=80,
+    port=443,
+    ssl=True,  # use HTTPS so Basic auth credentials are not sent in cleartext
     settings=Settings(
         chroma_client_auth_provider="chromadb.auth.basic_authn.BasicAuthClientProvider",
         chroma_client_auth_credentials=os.getenv("CHROMA_CLIENT_AUTH_CREDENTIALS")
@@ -162,9 +188,11 @@ export CHROMA_CLIENT_AUTH_CREDENTIALS="<USERNAME>:<PASSWORD>"
 | Variable | Description |
 |----------|-------------|
 | `CC_FS_BUCKET` | Configuration for the FS Bucket mounted at `/db` |
-| `CHROMA_SERVER_AUTHN_PROVIDER` | Authentication provider for ChromaDB |
-| `CHROMA_SERVER_AUTHN_CREDENTIALS` | Encoded credentials for ChromaDB authentication |
-| `CC_RUN_COMMAND` | Command to start the ChromaDB server |
+| `PROXY_AUTH_CREDENTIALS` | `htpasswd`-style `user:hash` line the proxy validates Basic auth against |
+| `CC_WORKER_COMMAND_0` | Command to start the private ChromaDB server (worker) |
+| `CC_RUN_COMMAND` | Command to start the auth proxy on the public port (`python proxy.py`) |
+| `CHROMA_UPSTREAM` | Optional. Upstream ChromaDB URL the proxy forwards to (default `http://127.0.0.1:8000`) |
+| `ANONYMIZED_TELEMETRY` | Optional. Set to `False` to disable ChromaDB's anonymized telemetry |
 
 ## Customizing Your Application
 
@@ -173,16 +201,47 @@ export CHROMA_CLIENT_AUTH_CREDENTIALS="<USERNAME>:<PASSWORD>"
 To use a specific version of ChromaDB, update the `requirements.txt` file:
 
 ```
-chromadb==0.4.18  # Replace with your desired version
+chromadb==1.5.9  # Replace with your desired version
 ```
 
 ### Additional Configuration
 
-ChromaDB supports various configuration options. You can add them to your `CC_RUN_COMMAND` environment variable:
+ChromaDB supports various configuration options. You can tweak the server launch command in your `CC_WORKER_COMMAND_0` environment variable (keep it on the private `127.0.0.1:8000` address so it stays behind the proxy):
 
 ```bash
-clever env set CC_RUN_COMMAND "chroma run --host 0.0.0.0 --port 9000 --path db/data --telemetry-enabled false"
+clever env set CC_WORKER_COMMAND_0 "chroma run --host 127.0.0.1 --port 8000 --path db/data"
 ```
+
+To disable anonymized telemetry, set the dedicated environment variable (`chroma run` doesn't expose a telemetry flag; telemetry is controlled via the `ANONYMIZED_TELEMETRY` environment variable):
+
+```bash
+clever env set ANONYMIZED_TELEMETRY "False"
+```
+
+## Testing Locally
+
+You can run the exact same setup on your machine before deploying:
+
+```bash
+# 1. Create a virtual environment and install the dependencies
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 2. Start ChromaDB privately (in one terminal)
+chroma run --host 127.0.0.1 --port 8000 --path db/data
+
+# 3. Start the auth proxy on the public port (in another terminal)
+export PROXY_AUTH_CREDENTIALS="$(htpasswd -Bbn myuser mypass)"
+python proxy.py
+
+# 4. Connect with the client (port 9000, no TLS locally)
+export CHROMA_CLIENT_AUTH_CREDENTIALS="myuser:mypass"
+# In the sample client, set host="localhost", port=9000, ssl=False
+```
+
+Requests with the wrong (or no) credentials are rejected with `401 Unauthorized`;
+only `myuser:mypass` gets through to ChromaDB.
 
 ## Troubleshooting
 

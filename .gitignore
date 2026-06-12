@@ -1,2 +1,7 @@
 .clever.json
 env.sh
+.DS_Store
+.env
+.venv/
+db/
+__pycache__/
